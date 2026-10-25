@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from zipfile import ZipFile, BadZipFile
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -30,6 +31,42 @@ from schemas import (LoginIn, UserIn, CustomerIn, ProductIn, MaterialIn, Movemen
                      OrderIn, OrderStatusIn, JobIn, TaskIn, ProgressIn, InspectionIn)
 
 ROOT = Path(__file__).resolve().parent
+
+
+def prepare_frontend(root: Path = ROOT) -> Path:
+    """Restore frontend files if GitHub upload omitted the static/ folder.
+
+    The bundled frontend is a fallback for deployment mistakes, not a replacement
+    for keeping frontend sources under version control.
+    """
+    assets = root / 'static'
+    required = ('index.html', 'styles.css', 'app.js')
+    missing = [name for name in required if not (assets / name).is_file()]
+    if not missing:
+        return assets
+    bundle = root / 'frontend_bundle.zip'
+    if not bundle.is_file():
+        raise RuntimeError(
+            'Moreda ERP frontend files are missing: '
+            + ', '.join('static/' + name for name in missing)
+            + '. Upload the static/ folder OR frontend_bundle.zip to the '
+            'same GitHub repository directory as main.py and redeploy.'
+        )
+    try:
+        with ZipFile(bundle) as z:
+            for name in missing:
+                # Exact known filenames; don't extract arbitrary archive paths.
+                if name not in z.namelist():
+                    raise RuntimeError('frontend_bundle.zip is missing ' + name)
+                target = assets / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(z.read(name))
+    except BadZipFile as exc:
+        raise RuntimeError('frontend_bundle.zip is corrupt; re-upload it.') from exc
+    return assets
+
+
+STATIC_ROOT = prepare_frontend()
 PRODUCTION = os.getenv('APP_ENV') == 'production'
 SECRET = os.getenv('SECRET_KEY', '')
 if PRODUCTION and (len(SECRET) < 32 or SECRET.startswith('CHANGE_ME')):
@@ -154,7 +191,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title='Moreda ERP', version='1.0.0', lifespan=lifespan, docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET, session_cookie='moreda_session',
                    max_age=60 * 60 * 8, same_site='lax', https_only=PRODUCTION)
-app.mount('/static', StaticFiles(directory=str(ROOT / 'static')), name='static')
+app.mount('/static', StaticFiles(directory=str(STATIC_ROOT)), name='static')
 
 
 @app.middleware('http')
@@ -172,7 +209,7 @@ async def safety_headers(request: Request, call_next):
 
 @app.get('/')
 def home():
-    return FileResponse(ROOT / 'static' / 'index.html')
+    return FileResponse(STATIC_ROOT / 'index.html')
 
 
 @app.get('/healthz')
